@@ -25,3 +25,14 @@ tasks:
       - postDevcontainerStart
     dependsOn:
       - install-python-deps
+
+  prebuild-pylance-index:
+    name: Prebuild Pylance index
+    description: Start a headless VS Code server and trigger Pylance indexing.
+    command: |
+      bash scripts/prebuild-pylance-index.sh
+    triggeredBy:
+      - prebuild
+    dependsOn:
+      - install-python-deps
+      - install-node-deps

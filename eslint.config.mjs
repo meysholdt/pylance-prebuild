@@ -58,6 +58,7 @@ export default [
             "docs/_build/**/*.js",
             "node_modules/**.js",
             "tests/**/*.js",
+            "scripts/**/*.js",
         ]
     }
 ];

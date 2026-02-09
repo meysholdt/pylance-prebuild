@@ -1,6 +1,9 @@
 {
   "name": "Django Dev",
-  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "build": {
+    "context": ".",
+    "dockerfile": "Dockerfile"
+  },
   "features": {
     "ghcr.io/devcontainers/features/node": {}
   },
@@ -8,7 +11,11 @@
     "vscode": {
       "extensions": [
         "ms-python.vscode-pylance"
-      ]
+      ],
+      "settings": {
+        "python.analysis.persistAllIndices": true,
+        "python.analysis.indexing": true
+      }
     }
   }
 }
