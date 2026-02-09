@@ -51,22 +51,34 @@ done
 if [[ -z "$VSCODE_CLI" ]]; then
     log "VS Code CLI not found locally, downloading..."
 
-    # Detect the commit hash from the running vscode-browser-agent or from
-    # the shared VS Code server installation.
+    # Detect the commit hash from the running vscode-browser-agent, the
+    # shared VS Code server installation, or fall back to latest stable.
     COMMIT=""
+
+    # Try 1: running vscode-browser-agent process
     AGENT_CMD=$(ps -eo args 2>/dev/null | grep "vscode-browser-agent run" | grep -v grep | head -1 || true)
     if [[ -n "$AGENT_CMD" ]]; then
         COMMIT=$(echo "$AGENT_CMD" | grep -oP '(?<=--commit )\S+' || true)
     fi
+
+    # Try 2: shared VS Code server path (only if directory actually exists)
+    if [[ -z "$COMMIT" && -d "/usr/local/gitpod/shared/vscode/vscode-server/bin" ]]; then
+        COMMIT=$(ls /usr/local/gitpod/shared/vscode/vscode-server/bin/ 2>/dev/null | head -1 || true)
+    fi
+
+    # Try 3: product.json from any installed server
     if [[ -z "$COMMIT" ]]; then
-        # Fall back to the shared path
-        for d in /usr/local/gitpod/shared/vscode/vscode-server/bin/*/; do
-            COMMIT=$(basename "$d")
-            break
+        for pj in /home/vscode/.vscode-server/cli/serve-web/*/product.json \
+                  /home/vscode/.vscode-browser-server/product.json; do
+            if [[ -f "$pj" ]]; then
+                COMMIT=$(grep -oP '"commit"\s*:\s*"\K[a-f0-9]+' "$pj" 2>/dev/null | head -1 || true)
+                [[ -n "$COMMIT" ]] && break
+            fi
         done
     fi
+
+    # Fallback: latest stable
     if [[ -z "$COMMIT" ]]; then
-        # Fall back to latest stable
         COMMIT="latest"
     fi
 
