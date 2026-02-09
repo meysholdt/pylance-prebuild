@@ -1,0 +1,27 @@
+tasks:
+  install-python-deps:
+    name: Install Python dependencies
+    description: Install Django in editable mode with dev dependencies.
+    command: |
+      pip install -e .
+      pip install tox pre-commit
+    triggeredBy:
+      - postDevcontainerStart
+
+  install-node-deps:
+    name: Install Node dependencies
+    description: Install JS test and lint dependencies.
+    command: |
+      npm install
+    triggeredBy:
+      - postDevcontainerStart
+
+  setup-pre-commit:
+    name: Setup pre-commit hooks
+    description: Install pre-commit git hooks.
+    command: |
+      pre-commit install
+    triggeredBy:
+      - postDevcontainerStart
+    dependsOn:
+      - install-python-deps
