@@ -6,9 +6,11 @@
 # VS Code's extension host only activates when a client connects
 # with a workspace folder. This script:
 #   1. Finds the VS Code desktop server binary (code-server)
-#   2. Starts it via the VS Code CLI's serve-web command
-#   3. Connects Puppeteer to open the workspace and trigger Pylance
-#   4. Waits for Pylance to finish indexing
+#   2. Patches the Pylance extension to enable indexing in web mode
+#   3. Starts it via the VS Code CLI's serve-web command
+#   4. Connects Puppeteer to open the workspace and trigger Pylance
+#   5. Waits for Pylance to finish indexing
+#   6. Restores the original extension bundle
 #
 set -euo pipefail
 
@@ -25,6 +27,12 @@ cleanup() {
     if [[ -n "${SERVER_PID:-}" ]]; then
         kill "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    # Restore patched extension bundles
+    if [[ -n "${PYLANCE_BUNDLE_BAK:-}" && -f "$PYLANCE_BUNDLE_BAK" ]]; then
+        cp "$PYLANCE_BUNDLE_BAK" "${PYLANCE_BUNDLE_BAK%.bak}"
+        rm -f "$PYLANCE_BUNDLE_BAK"
+        log "Restored Pylance extension bundle"
     fi
     rm -rf "$SERVER_DATA_DIR"
 }
@@ -197,7 +205,75 @@ if [[ -n "$SERVE_WEB_DIR" ]]; then
     done
 fi
 
-# --- Step 6: Connect Puppeteer to trigger Pylance indexing ---
+# --- Step 6: Patch Pylance extension to enable indexing in web mode ---
+# Pylance disables indexing (IDX thread) in VS Code Web by checking
+# workspace kinds. We patch the extension bundle to skip this check.
+log "Patching Pylance extension for web-mode indexing..."
+PYLANCE_BUNDLE_BAK=""
+PYLANCE_EXT_DIR=""
+
+# Find the Pylance extension in the server's extensions dir
+for d in "$SERVER_DATA_DIR/extensions" /home/vscode/.vscode-browser-server/extensions; do
+    PYLANCE_EXT_DIR=$(ls -d "$d"/ms-python.vscode-pylance-* 2>/dev/null | head -1)
+    if [[ -n "$PYLANCE_EXT_DIR" ]]; then
+        break
+    fi
+done
+
+if [[ -n "$PYLANCE_EXT_DIR" && -f "$PYLANCE_EXT_DIR/dist/extension.bundle.js" ]]; then
+    BUNDLE="$PYLANCE_EXT_DIR/dist/extension.bundle.js"
+    PYLANCE_BUNDLE_BAK="${BUNDLE}.bak"
+    cp "$BUNDLE" "$PYLANCE_BUNDLE_BAK"
+
+    python3 -c "
+import sys
+with open('$BUNDLE', 'r') as f:
+    content = f.read()
+
+# The extension sets indexing=false when the workspace kind is 'Default' (web mode).
+# Pattern: (!workspace.rootUri || workspace.kinds.includes(WellKnownWorkspaceKinds.Default)) && (settings.indexing = false)
+old = \"(!_0x1ddc26[_0x2c1599(0xe8d)]||_0x1ddc26[_0x2c1599(0xcb1)]['includes'](_0x4b18f1[_0x2c1599(0x1417)]['Default']))&&(_0x42a990[_0x2c1599(0xd6b)]=![])\"
+if old in content:
+    new = 'void(0)' + ' ' * (len(old) - 7)
+    content = content.replace(old, new, 1)
+    with open('$BUNDLE', 'w') as f:
+        f.write(content)
+    print('Patched: disabled web-mode indexing restriction')
+else:
+    print('WARNING: Patch pattern not found (Pylance version may have changed)')
+    sys.exit(0)
+"
+    log "Pylance extension patched"
+else
+    log "WARNING: Pylance extension not found, skipping patch"
+fi
+
+# Restart server to load the patched extension
+if [[ -n "$PYLANCE_BUNDLE_BAK" ]]; then
+    log "Restarting server with patched extension..."
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    sleep 2
+
+    "$VSCODE_CLI" serve-web \
+        --host 127.0.0.1 \
+        --port "$PORT" \
+        --without-connection-token \
+        --accept-server-license-terms \
+        --server-data-dir "$SERVER_DATA_DIR" \
+        > "$SERVER_DATA_DIR/server.log" 2>&1 &
+    SERVER_PID=$!
+
+    for i in $(seq 1 30); do
+        if curl -sf -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null; then
+            log "Server restarted with patched extension"
+            break
+        fi
+        sleep 2
+    done
+fi
+
+# --- Step 7: Connect Puppeteer to trigger Pylance indexing ---
 log "Connecting headless browser to trigger Pylance indexing..."
 node "$SCRIPT_DIR/prebuild-pylance-connect.js" "$PORT" "$SERVER_DATA_DIR" "$WORKSPACE" "$TIMEOUT"
 EXIT_CODE=$?

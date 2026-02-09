@@ -3,6 +3,9 @@
 // Connects a headless browser to a VS Code web server to trigger
 // extension host activation and Pylance indexing.
 //
+// Pylance defers indexing until a text document is opened. This script
+// opens a Python file via keyboard shortcuts to trigger the IDX thread.
+//
 // Usage: node prebuild-pylance-connect.js <port> <server-data-dir> <workspace-folder> [timeout-seconds]
 //
 
@@ -49,7 +52,7 @@ function findPylanceLog(serverDataDir) {
 
 function checkPylanceStatus(logPath) {
     if (!logPath || !fs.existsSync(logPath)) {
-        return {started: false, ready: false, files: 0};
+        return {started: false, ready: false, indexing: false, indexDone: false, files: 0};
     }
 
     var content = fs.readFileSync(logPath, "utf8");
@@ -58,14 +61,86 @@ function checkPylanceStatus(logPath) {
     var files = foundFiles ? parseInt(foundFiles[1], 10) : 0;
     var bgStarted = content.indexOf("background worker") !== -1 &&
         content.indexOf("started") !== -1;
+    var idxStarted = content.indexOf("IDX(") !== -1;
+    var idxDone = content.indexOf("Indexing finished") !== -1 ||
+        content.indexOf("indexingdone") !== -1 ||
+        content.indexOf("Workspace indexing done") !== -1;
 
-    return {started: started, ready: bgStarted && files > 0, files: files};
+    return {
+        started: started,
+        ready: bgStarted && files > 0,
+        indexing: idxStarted,
+        indexDone: idxDone,
+        files: files
+    };
+}
+
+// Find a Python file in the workspace to open.
+// Must be a .py file so Pylance triggers onDidOpenTextDocument.
+function findPythonFile(workspace) {
+    var candidates = [
+        "django/__init__.py",
+        "django/__main__.py",
+        "setup.py",
+        "manage.py"
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+        var fullPath = path.join(workspace, candidates[i]);
+        if (fs.existsSync(fullPath)) {
+            return candidates[i];
+        }
+    }
+    // Fallback: find any .py file recursively
+    function findPyRecursive(dir, depth) {
+        if (depth > 3) return null;
+        try {
+            var entries = fs.readdirSync(dir);
+            for (var j = 0; j < entries.length; j++) {
+                var entry = entries[j];
+                if (entry === "node_modules" || entry === ".git" || entry === "__pycache__") continue;
+                var fullPath = path.join(dir, entry);
+                if (entry.endsWith(".py")) {
+                    return path.relative(workspace, fullPath);
+                }
+                try {
+                    var stat = fs.statSync(fullPath);
+                    if (stat.isDirectory()) {
+                        var found = findPyRecursive(fullPath, depth + 1);
+                        if (found) return found;
+                    }
+                } catch (e) { /* ignore */ }
+            }
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+    return findPyRecursive(workspace, 0);
 }
 
 function sleep(ms) {
     return new Promise(function(resolve) {
         setTimeout(resolve, ms);
     });
+}
+
+async function openFileInVSCode(page, filename) {
+    // Use Ctrl+P (Quick Open) to open a file
+    log("Opening file via Quick Open: " + filename);
+
+    // Press Ctrl+P to open Quick Open
+    await page.keyboard.down("Control");
+    await page.keyboard.press("KeyP");
+    await page.keyboard.up("Control");
+    await sleep(2000);
+
+    // Type the filename
+    await page.keyboard.type(filename, {delay: 30});
+    await sleep(2000);
+
+    // Press Enter to open
+    await page.keyboard.press("Enter");
+    await sleep(3000);
+
+    log("File open command sent");
 }
 
 async function main() {
@@ -81,12 +156,27 @@ async function main() {
 
     log("Navigating to VS Code web UI...");
     await page.goto(TARGET_URL, {waitUntil: "domcontentloaded", timeout: 30000});
-    log("Page loaded, waiting for Pylance to activate and index...");
+    log("Page loaded, waiting for VS Code to initialize...");
+
+    // Wait for VS Code to fully initialize before interacting
+    await sleep(15000);
+
+    // Open a Python file to trigger Pylance's deferred indexing.
+    // Pylance only starts the IDX thread after a text document is opened.
+    var pyFile = findPythonFile(WORKSPACE);
+    if (pyFile) {
+        await openFileInVSCode(page, pyFile);
+    } else {
+        log("WARNING: No Python file found to open, indexing may not start");
+    }
+
+    log("Waiting for Pylance to activate and index...");
 
     var startTime = Date.now();
     var timeoutMs = TIMEOUT_SEC * 1000;
     var pylanceReady = false;
     var lastStatus = "";
+    var retried = false;
 
     while (Date.now() - startTime < timeoutMs) {
         await sleep(5000);
@@ -96,17 +186,50 @@ async function main() {
 
         var statusMsg = "started=" + status.started +
             " ready=" + status.ready +
+            " indexing=" + status.indexing +
+            " indexDone=" + status.indexDone +
             " files=" + status.files;
         if (statusMsg !== lastStatus) {
             log("Pylance: " + statusMsg);
             lastStatus = statusMsg;
         }
 
-        if (status.ready) {
-            log("Pylance background workers started, waiting 30s for indexing...");
-            await sleep(30000);
+        if (status.indexDone) {
+            log("Pylance indexing completed!");
             pylanceReady = true;
             break;
+        }
+
+        if (status.ready && !status.indexing && !retried) {
+            // Background workers started but IDX hasn't started yet.
+            // The file might not have been opened successfully. Retry.
+            if (pyFile && Date.now() - startTime > 30000) {
+                log("IDX not started, retrying file open...");
+                await openFileInVSCode(page, pyFile);
+                retried = true;
+            }
+        }
+
+        if (status.ready && status.indexing) {
+            log("IDX thread is running, waiting for completion...");
+        }
+    }
+
+    // If IDX started but didn't finish, give it extra time
+    if (!pylanceReady) {
+        var logPath2 = findPylanceLog(SERVER_DATA_DIR);
+        var finalStatus = checkPylanceStatus(logPath2);
+        if (finalStatus.indexing && !finalStatus.indexDone) {
+            log("IDX still running, waiting 60s more...");
+            await sleep(60000);
+            finalStatus = checkPylanceStatus(logPath2);
+            pylanceReady = finalStatus.indexDone;
+        } else if (finalStatus.ready && !finalStatus.indexing) {
+            // BG workers started but IDX never started.
+            // Wait a bit more in case indexing is happening without IDX log entries.
+            log("Background workers ready, waiting 30s for index persistence...");
+            await sleep(30000);
+            pylanceReady = true;
         }
     }
 
