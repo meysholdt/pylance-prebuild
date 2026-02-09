@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 #
-# Prebuild script that starts a headless VS Code server, installs Pylance,
+# Prebuild script that starts a headless VS Code web server, installs Pylance,
 # and triggers indexing via a headless browser connection.
 #
 # The VS Code extension host only activates when a client connects,
 # so we use Puppeteer to open the workspace in a headless browser.
+#
+# During a prebuild the VS Code CLI (which provides `serve-web`) is not
+# pre-installed. This script downloads it from update.code.visualstudio.com,
+# matching the commit used by the environment's vscode-browser-agent.
 #
 set -euo pipefail
 
@@ -16,12 +20,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
-# --- Step 0: Ensure Puppeteer's Chrome is installed ---
-if [[ ! -d "$HOME/.cache/puppeteer/chrome" ]]; then
-    log "Installing Chrome for Puppeteer..."
-    node node_modules/puppeteer/install.mjs 2>&1 | tail -3
-fi
-
 cleanup() {
     log "Cleaning up..."
     if [[ -n "${SERVER_PID:-}" ]]; then
@@ -32,9 +30,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- Step 1: Find the VS Code CLI binary ---
+# --- Step 0: Ensure Puppeteer's Chrome is installed ---
+if [[ ! -d "$HOME/.cache/puppeteer/chrome" ]]; then
+    log "Installing Chrome for Puppeteer..."
+    node node_modules/puppeteer/install.mjs 2>&1 | tail -3
+fi
+
+# --- Step 1: Find or download the VS Code CLI ---
 log "Finding VS Code CLI..."
 VSCODE_CLI=""
+
+# Try existing locations first
 for f in /home/vscode/.vscode-server/code-*; do
     if [[ -x "$f" && ! -d "$f" ]]; then
         VSCODE_CLI="$f"
@@ -43,21 +49,59 @@ for f in /home/vscode/.vscode-server/code-*; do
 done
 
 if [[ -z "$VSCODE_CLI" ]]; then
-    log "ERROR: VS Code CLI not found in /home/vscode/.vscode-server/"
-    exit 1
+    log "VS Code CLI not found locally, downloading..."
+
+    # Detect the commit hash from the running vscode-browser-agent or from
+    # the shared VS Code server installation.
+    COMMIT=""
+    AGENT_CMD=$(ps -eo args 2>/dev/null | grep "vscode-browser-agent run" | grep -v grep | head -1 || true)
+    if [[ -n "$AGENT_CMD" ]]; then
+        COMMIT=$(echo "$AGENT_CMD" | grep -oP '(?<=--commit )\S+' || true)
+    fi
+    if [[ -z "$COMMIT" ]]; then
+        # Fall back to the shared path
+        for d in /usr/local/gitpod/shared/vscode/vscode-server/bin/*/; do
+            COMMIT=$(basename "$d")
+            break
+        done
+    fi
+    if [[ -z "$COMMIT" ]]; then
+        # Fall back to latest stable
+        COMMIT="latest"
+    fi
+
+    # Detect architecture
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)  CLI_ARCH="x64" ;;
+        aarch64) CLI_ARCH="arm64" ;;
+        armv7l)  CLI_ARCH="armhf" ;;
+        *)       CLI_ARCH="$ARCH" ;;
+    esac
+
+    if [[ "$COMMIT" == "latest" ]]; then
+        DOWNLOAD_URL="https://update.code.visualstudio.com/latest/cli-linux-${CLI_ARCH}/stable"
+    else
+        DOWNLOAD_URL="https://update.code.visualstudio.com/commit:${COMMIT}/cli-linux-${CLI_ARCH}/stable"
+    fi
+
+    log "Downloading VS Code CLI (commit: $COMMIT, arch: $CLI_ARCH)..."
+    CLI_DIR="/tmp/vscode-cli-$$"
+    mkdir -p "$CLI_DIR"
+    curl -sfL "$DOWNLOAD_URL" | tar xz -C "$CLI_DIR"
+
+    VSCODE_CLI="$CLI_DIR/code"
+    if [[ ! -x "$VSCODE_CLI" ]]; then
+        log "ERROR: Failed to download VS Code CLI"
+        ls -la "$CLI_DIR/" 2>/dev/null
+        exit 1
+    fi
+    log "Downloaded VS Code CLI to $VSCODE_CLI"
 fi
+
 log "Using VS Code CLI: $VSCODE_CLI"
 
-# --- Step 2: Find the code-server binary for extension installation ---
-SERVE_WEB_DIR=""
-for d in /home/vscode/.vscode/cli/serve-web/*/; do
-    if [[ -x "${d}bin/code-server" ]]; then
-        SERVE_WEB_DIR="$d"
-        break
-    fi
-done
-
-# --- Step 3: Start serve-web to download the server if needed ---
+# --- Step 2: Start serve-web (downloads the server on first run) ---
 log "Starting VS Code web server on port $PORT..."
 mkdir -p "$SERVER_DATA_DIR"
 
@@ -86,20 +130,19 @@ done
 
 if ! curl -sf -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null; then
     log "ERROR: Server failed to start within 120s"
-    cat "$SERVER_DATA_DIR/server.log" | tail -20
+    tail -20 "$SERVER_DATA_DIR/server.log"
     exit 1
 fi
 
-# --- Step 4: Find the serve-web code-server and install extensions ---
-# After serve-web downloads, the code-server binary should be available
-if [[ -z "$SERVE_WEB_DIR" ]]; then
-    for d in /home/vscode/.vscode/cli/serve-web/*/; do
-        if [[ -x "${d}bin/code-server" ]]; then
-            SERVE_WEB_DIR="$d"
-            break
-        fi
-    done
-fi
+# --- Step 3: Install Pylance extensions ---
+# Find the code-server binary that serve-web downloaded
+SERVE_WEB_DIR=""
+for d in /home/vscode/.vscode/cli/serve-web/*/; do
+    if [[ -x "${d}bin/code-server" ]]; then
+        SERVE_WEB_DIR="$d"
+        break
+    fi
+done
 
 if [[ -n "$SERVE_WEB_DIR" ]]; then
     log "Installing Pylance extensions..."
@@ -148,23 +191,19 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-# --- Step 5: Connect Puppeteer to trigger Pylance indexing ---
+# --- Step 4: Connect Puppeteer to trigger Pylance indexing ---
 log "Connecting headless browser to trigger Pylance indexing..."
 node "$SCRIPT_DIR/prebuild-pylance-connect.js" "$PORT" "$SERVER_DATA_DIR" "$WORKSPACE" "$TIMEOUT"
 EXIT_CODE=$?
 
-# --- Step 6: Copy index data to the browser server data dir ---
+# --- Step 5: Copy index data to the browser server data dir ---
 # so it's available when the real VS Code server starts
 BROWSER_DATA="/home/vscode/.vscode-browser-server"
-if [[ -d "$SERVER_DATA_DIR/extensions" && -d "$BROWSER_DATA" ]]; then
-    log "Copying extension data to browser server..."
-    # Copy any persisted index data from globalStorage
-    if [[ -d "$SERVER_DATA_DIR/data/User/globalStorage/ms-python.vscode-pylance" ]]; then
-        mkdir -p "$BROWSER_DATA/data/User/globalStorage/"
-        cp -r "$SERVER_DATA_DIR/data/User/globalStorage/ms-python.vscode-pylance" \
-              "$BROWSER_DATA/data/User/globalStorage/" 2>/dev/null || true
-        log "Copied Pylance index data to browser server"
-    fi
+if [[ -d "$SERVER_DATA_DIR/data/User/globalStorage/ms-python.vscode-pylance" ]]; then
+    mkdir -p "$BROWSER_DATA/data/User/globalStorage/"
+    cp -r "$SERVER_DATA_DIR/data/User/globalStorage/ms-python.vscode-pylance" \
+          "$BROWSER_DATA/data/User/globalStorage/" 2>/dev/null || true
+    log "Copied Pylance index data to browser server"
 fi
 
 if [[ $EXIT_CODE -eq 0 ]]; then
