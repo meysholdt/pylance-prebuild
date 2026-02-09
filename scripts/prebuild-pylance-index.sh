@@ -278,6 +278,16 @@ log "Connecting headless browser to trigger Pylance indexing..."
 node "$SCRIPT_DIR/prebuild-pylance-connect.js" "$PORT" "$SERVER_DATA_DIR" "$WORKSPACE" "$TIMEOUT"
 EXIT_CODE=$?
 
+# --- Step 8: Print Pylance Language Server log ---
+log "--- Pylance Language Server log ---"
+PYLANCE_LOG=$(find "$SERVER_DATA_DIR/data/logs" -name "Python Language Server.log" 2>/dev/null | sort | tail -1)
+if [[ -n "$PYLANCE_LOG" && -f "$PYLANCE_LOG" ]]; then
+    cat "$PYLANCE_LOG"
+else
+    log "WARNING: Pylance log not found in $SERVER_DATA_DIR/data/logs"
+fi
+log "--- End of Pylance log ---"
+
 if [[ $EXIT_CODE -eq 0 ]]; then
     log "Pylance prebuild indexing completed successfully"
 else
