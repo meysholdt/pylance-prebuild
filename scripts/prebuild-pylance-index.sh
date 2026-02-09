@@ -5,9 +5,9 @@
 #
 # VS Code's extension host only activates when a client connects
 # with a workspace folder. This script:
-#   1. Finds the VS Code desktop server binary (code-server)
-#   2. Patches the Pylance extension to enable indexing in web mode
-#   3. Starts it via the VS Code CLI's serve-web command
+#   1. Starts a VS Code serve-web server
+#   2. Installs Pylance extensions
+#   3. Patches the extension to enable indexing in web mode
 #   4. Connects Puppeteer to open the workspace and trigger Pylance
 #   5. Waits for Pylance to finish indexing
 #   6. Restores the original extension bundle
@@ -164,45 +164,38 @@ if ! curl -sf -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null; then
     exit 1
 fi
 
-# --- Step 5: Install Pylance extensions into the server ---
-SERVE_WEB_DIR=""
-for d in /home/vscode/.vscode/cli/serve-web/*/; do
-    if [[ -x "${d}bin/code-server" ]]; then
-        SERVE_WEB_DIR="$d"
-        break
+# --- Step 5: Install Pylance extensions ---
+# serve-web downloads a code-server binary on first start.
+# Find it and use it to install extensions into the server data dir.
+log "Installing Pylance extensions..."
+CODE_SERVER=""
+
+# Look for code-server in known locations (serve-web downloads it here)
+for i in $(seq 1 30); do
+    for d in /home/vscode/.vscode/cli/serve-web/*/bin \
+             /home/vscode/.vscode-server/cli/serve-web/*/bin; do
+        if [[ -x "${d}/code-server" ]]; then
+            CODE_SERVER="${d}/code-server"
+            break 2
+        fi
+    done
+    if [[ $i -eq 1 ]]; then
+        log "Waiting for serve-web to download code-server..."
     fi
+    sleep 2
 done
 
-if [[ -n "$SERVE_WEB_DIR" ]]; then
-    log "Installing Pylance extensions..."
-    "${SERVE_WEB_DIR}bin/code-server" \
+if [[ -n "$CODE_SERVER" ]]; then
+    log "Using code-server: $CODE_SERVER"
+    "$CODE_SERVER" \
         --accept-server-license-terms \
         --server-data-dir "$SERVER_DATA_DIR" \
         --install-extension ms-python.python \
         --install-extension ms-python.vscode-pylance \
-        2>&1 | grep -E "installed|Installing" || true
-
-    # Restart server to pick up extensions
-    log "Restarting server with extensions..."
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
-    sleep 2
-
-    "$VSCODE_CLI" serve-web \
-        --host 127.0.0.1 \
-        --port "$PORT" \
-        --without-connection-token \
-        --accept-server-license-terms \
-        --server-data-dir "$SERVER_DATA_DIR" \
-        > "$SERVER_DATA_DIR/server.log" 2>&1 &
-    SERVER_PID=$!
-
-    for i in $(seq 1 30); do
-        if curl -sf -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null; then
-            break
-        fi
-        sleep 2
-    done
+        2>&1 | grep -E "installed|Installing|already" || true
+    log "Extensions installed"
+else
+    log "WARNING: code-server not found, extensions may not be available"
 fi
 
 # --- Step 6: Patch Pylance extension to enable indexing in web mode ---
@@ -212,8 +205,10 @@ log "Patching Pylance extension for web-mode indexing..."
 PYLANCE_BUNDLE_BAK=""
 PYLANCE_EXT_DIR=""
 
-# Find the Pylance extension in the server's extensions dir
-for d in "$SERVER_DATA_DIR/extensions" /home/vscode/.vscode-browser-server/extensions; do
+# Find the Pylance extension in known locations
+for d in "$SERVER_DATA_DIR/extensions" \
+         /home/vscode/.vscode-browser-server/extensions \
+         /home/vscode/.vscode-server/extensions; do
     PYLANCE_EXT_DIR=$(ls -d "$d"/ms-python.vscode-pylance-* 2>/dev/null | head -1)
     if [[ -n "$PYLANCE_EXT_DIR" ]]; then
         break
@@ -245,33 +240,31 @@ else:
 "
     log "Pylance extension patched"
 else
-    log "WARNING: Pylance extension not found, skipping patch"
+    log "WARNING: Pylance extension not found at any known location, skipping patch"
 fi
 
-# Restart server to load the patched extension
-if [[ -n "$PYLANCE_BUNDLE_BAK" ]]; then
-    log "Restarting server with patched extension..."
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
+# Restart server to load installed extensions and patch
+log "Restarting server..."
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+sleep 2
+
+"$VSCODE_CLI" serve-web \
+    --host 127.0.0.1 \
+    --port "$PORT" \
+    --without-connection-token \
+    --accept-server-license-terms \
+    --server-data-dir "$SERVER_DATA_DIR" \
+    > "$SERVER_DATA_DIR/server.log" 2>&1 &
+SERVER_PID=$!
+
+for i in $(seq 1 30); do
+    if curl -sf -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null; then
+        log "Server restarted"
+        break
+    fi
     sleep 2
-
-    "$VSCODE_CLI" serve-web \
-        --host 127.0.0.1 \
-        --port "$PORT" \
-        --without-connection-token \
-        --accept-server-license-terms \
-        --server-data-dir "$SERVER_DATA_DIR" \
-        > "$SERVER_DATA_DIR/server.log" 2>&1 &
-    SERVER_PID=$!
-
-    for i in $(seq 1 30); do
-        if curl -sf -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null; then
-            log "Server restarted with patched extension"
-            break
-        fi
-        sleep 2
-    done
-fi
+done
 
 # --- Step 7: Connect Puppeteer to trigger Pylance indexing ---
 log "Connecting headless browser to trigger Pylance indexing..."
