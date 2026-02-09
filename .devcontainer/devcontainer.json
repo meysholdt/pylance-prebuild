@@ -14,7 +14,13 @@
       ],
       "settings": {
         "python.analysis.persistAllIndices": true,
-        "python.analysis.indexing": true
+        "python.analysis.indexing": true,
+        "python.analysis.userFileIndexingLimit": -1,
+        "python.analysis.logLevel": "Trace",
+        "python.analysis.packageIndexDepths": [
+          { "name": "django", "depth": 3, "includeAllSymbols": true },
+          { "name": "", "depth": 2, "includeAllSymbols": false }
+        ]
       }
     }
   }

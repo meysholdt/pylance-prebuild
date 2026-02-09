@@ -30,7 +30,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- Step 0: Ensure Puppeteer's Chrome is installed ---
+# --- Step 0a: Ensure Python dependencies are installed ---
+# Pylance persistence applies to third-party library indices, so packages
+# must be installed before indexing for the index to be useful.
+if ! python -c "import django" 2>/dev/null; then
+    log "Installing Python dependencies..."
+    pip install -e "$WORKSPACE" 2>&1 | tail -3
+fi
+
+# --- Step 0b: Ensure Puppeteer's Chrome is installed ---
 if [[ ! -d "$HOME/.cache/puppeteer/chrome" ]]; then
     log "Installing Chrome for Puppeteer..."
     node node_modules/puppeteer/install.mjs 2>&1 | tail -3
@@ -171,6 +179,12 @@ if [[ -n "$SERVE_WEB_DIR" ]]; then
 {
     "python.analysis.persistAllIndices": true,
     "python.analysis.indexing": true,
+    "python.analysis.userFileIndexingLimit": -1,
+    "python.analysis.logLevel": "Trace",
+    "python.analysis.packageIndexDepths": [
+        { "name": "django", "depth": 3, "includeAllSymbols": true },
+        { "name": "", "depth": 2, "includeAllSymbols": false }
+    ],
     "python.defaultInterpreterPath": "/usr/local/bin/python"
 }
 SETTINGS
