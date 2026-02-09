@@ -1,9 +1,6 @@
 {
   "name": "Django Dev",
-  "build": {
-    "context": ".",
-    "dockerfile": "Dockerfile"
-  },
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
   "features": {
     "ghcr.io/devcontainers/features/node": {}
   },
@@ -16,7 +13,6 @@
         "python.analysis.persistAllIndices": true,
         "python.analysis.indexing": true,
         "python.analysis.userFileIndexingLimit": -1,
-        "python.analysis.logLevel": "Trace",
         "python.analysis.packageIndexDepths": [
           { "name": "django", "depth": 3, "includeAllSymbols": true },
           { "name": "", "depth": 2, "includeAllSymbols": false }
