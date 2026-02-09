@@ -28,10 +28,11 @@ tasks:
 
   prebuild-pylance-index:
     name: Prebuild Pylance index
-    description: Install Python packages and configure pyrightconfig.json so Pylance starts fast.
+    description: Start VS Code desktop server and trigger Pylance indexing.
     command: |
       bash scripts/prebuild-pylance-index.sh
     triggeredBy:
       - prebuild
     dependsOn:
       - install-python-deps
+      - install-node-deps
